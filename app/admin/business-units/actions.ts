@@ -128,7 +128,7 @@ export async function createBusinessUnitAction(
     const { data, error } = await supabase
       .from("business_units")
       .insert({
-        title,
+        name: title,
         slug,
         summary,
         order_index,
@@ -175,7 +175,7 @@ export async function updateBusinessUnitAction(
     const { error } = await supabase
       .from("business_units")
       .update({
-        title,
+        name: title,
         slug,
         summary,
         order_index,
