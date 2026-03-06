@@ -3,21 +3,28 @@
 
 import "server-only";
 import { revalidatePath } from "next/cache";
-import { supabaseServerAction, supabaseServerReadonly } from "@/lib/supabase/server";
+import {
+  supabaseServerAction,
+  supabaseServerReadonly,
+} from "@/lib/supabase/server";
+import { requireAdminNoRedirect } from "@/lib/auth/requireAdmin";
 
-export type ActionResult<T> = { ok: true; data: T } | { ok: false; message: string };
+export type ActionResult<T> =
+  | { ok: true; data: T }
+  | { ok: false; message: string };
+
 const ok = <T,>(data: T): ActionResult<T> => ({ ok: true, data });
-const fail = <T = never,>(message: string): ActionResult<T> => ({ ok: false, message });
+const fail = <T = never,>(message: string): ActionResult<T> => ({
+  ok: false,
+  message,
+});
 
-// ✅ Tes buckets réels dans Supabase Storage
 const VIDEO_BUCKET = "videos";
 const THUMB_BUCKET = "images";
 
-// ✅ Préfixes "dossiers" dans chaque bucket (optionnel mais propre)
 const VIDEO_PREFIX = "videos";
 const THUMB_PREFIX = "thumbnails";
 
-// Liaison avec la home
 const HOME_SECTION_KEY = "home.videos";
 
 function cleanText(v: unknown): string {
@@ -34,7 +41,7 @@ function sanitizeFilename(name: string) {
     .toLowerCase()
     .normalize("NFKD")
     .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-z0-9.\-_]+/g, "-")
+    .replace(/[^a-z0-9._-]+/g, "-")
     .replace(/-+/g, "-")
     .replace(/^-+|-+$/g, "");
 }
@@ -45,7 +52,12 @@ function isFile(v: unknown): v is File {
 
 async function getHomePageId(): Promise<string | null> {
   const supabase = await supabaseServerReadonly();
-  const { data, error } = await supabase.from("pages").select("id").eq("slug", "home").maybeSingle();
+  const { data, error } = await supabase
+    .from("pages")
+    .select("id")
+    .eq("slug", "home")
+    .maybeSingle();
+
   if (error) throw new Error(error.message);
   return (data as any)?.id ?? null;
 }
@@ -72,6 +84,8 @@ export async function listHomeVideosAdminAction(): Promise<
   >
 > {
   try {
+    await requireAdminNoRedirect();
+
     const supabase = await supabaseServerAction();
     const homeId = await getHomePageId();
     if (!homeId) return ok([]);
@@ -80,7 +94,8 @@ export async function listHomeVideosAdminAction(): Promise<
       .from("page_media")
       .select(
         `
-        order_index, section_key,
+        order_index,
+        section_key,
         media:media_id(
           id,kind,bucket,path,public_url,title,description,created_at,thumbnail_media_id
         )
@@ -104,8 +119,12 @@ export async function listHomeVideosAdminAction(): Promise<
   }
 }
 
-export async function uploadHomeVideoAction(formData: FormData): Promise<ActionResult<{ mediaId: string }>> {
+export async function uploadHomeVideoAction(
+  formData: FormData
+): Promise<ActionResult<{ mediaId: string }>> {
   try {
+    await requireAdminNoRedirect();
+
     const supabase = await supabaseServerAction();
 
     const title = cleanText(formData.get("title"));
@@ -116,34 +135,46 @@ export async function uploadHomeVideoAction(formData: FormData): Promise<ActionR
     const thumbFile = formData.get("thumbnail_file");
 
     if (!title) return fail("Le titre est obligatoire.");
-    if (!isFile(videoFile) || videoFile.size === 0) return fail("Fichier vidéo manquant.");
-    if (!String(videoFile.type || "").startsWith("video/")) return fail("Le fichier vidéo doit être de type video/*.");
+    if (!isFile(videoFile) || videoFile.size === 0) {
+      return fail("Fichier vidéo manquant.");
+    }
+    if (!String(videoFile.type || "").startsWith("video/")) {
+      return fail("Le fichier vidéo doit être de type video/*.");
+    }
 
-    // ✅ upload video -> bucket "videos"
-    const safeVideoName = sanitizeFilename(videoFile.name || "video.mp4") || "video.mp4";
+    const safeVideoName =
+      sanitizeFilename(videoFile.name || "video.mp4") || "video.mp4";
     const videoPath = `${VIDEO_PREFIX}/${Date.now()}-${safeVideoName}`;
 
-    const { error: upErr } = await supabase.storage.from(VIDEO_BUCKET).upload(videoPath, videoFile, {
-      contentType: videoFile.type || "video/mp4",
-      upsert: false,
-      cacheControl: "3600",
-    });
-    if (upErr) return fail(upErr.message);
-
-    // ✅ thumbnail optional -> bucket "images"
-    let thumbMediaId: string | null = null;
-
-    if (isFile(thumbFile) && thumbFile.size > 0) {
-      if (!String(thumbFile.type || "").startsWith("image/")) return fail("La miniature doit être une image.");
-
-      const safeThumbName = sanitizeFilename(thumbFile.name || "thumb.jpg") || "thumb.jpg";
-      const thumbPath = `${THUMB_PREFIX}/${Date.now()}-${safeThumbName}`;
-
-      const { error: tErr } = await supabase.storage.from(THUMB_BUCKET).upload(thumbPath, thumbFile, {
-        contentType: thumbFile.type || "image/jpeg",
+    const { error: upErr } = await supabase.storage
+      .from(VIDEO_BUCKET)
+      .upload(videoPath, videoFile, {
+        contentType: videoFile.type || "video/mp4",
         upsert: false,
         cacheControl: "3600",
       });
+
+    if (upErr) return fail(upErr.message);
+
+    let thumbMediaId: string | null = null;
+
+    if (isFile(thumbFile) && thumbFile.size > 0) {
+      if (!String(thumbFile.type || "").startsWith("image/")) {
+        return fail("La miniature doit être une image.");
+      }
+
+      const safeThumbName =
+        sanitizeFilename(thumbFile.name || "thumb.jpg") || "thumb.jpg";
+      const thumbPath = `${THUMB_PREFIX}/${Date.now()}-${safeThumbName}`;
+
+      const { error: tErr } = await supabase.storage
+        .from(THUMB_BUCKET)
+        .upload(thumbPath, thumbFile, {
+          contentType: thumbFile.type || "image/jpeg",
+          upsert: false,
+          cacheControl: "3600",
+        });
+
       if (tErr) return fail(tErr.message);
 
       const { data: thumbRow, error: thumbInsertErr } = await supabase
@@ -163,7 +194,6 @@ export async function uploadHomeVideoAction(formData: FormData): Promise<ActionR
       thumbMediaId = thumbRow.id as string;
     }
 
-    // insert media row (video)
     const { data: mediaRow, error: mErr } = await supabase
       .from("media")
       .insert({
@@ -182,12 +212,10 @@ export async function uploadHomeVideoAction(formData: FormData): Promise<ActionR
 
     const mediaId = mediaRow.id as string;
 
-    // link to home.videos (page_media)
     const homeId = await getHomePageId();
     if (homeId) {
       let finalOrder = orderIndex;
 
-      // ✅ -1 => auto à la fin (comme ton UI le dit)
       if (finalOrder < 0) {
         const { data: maxRow, error: maxErr } = await supabase
           .from("page_media")
@@ -199,7 +227,11 @@ export async function uploadHomeVideoAction(formData: FormData): Promise<ActionR
           .maybeSingle();
 
         if (maxErr) return fail(maxErr.message);
-        finalOrder = (maxRow as any)?.order_index != null ? Number((maxRow as any).order_index) + 1 : 0;
+
+        finalOrder =
+          (maxRow as any)?.order_index != null
+            ? Number((maxRow as any).order_index) + 1
+            : 0;
       }
 
       const { error: linkErr } = await supabase.from("page_media").insert({
@@ -214,14 +246,20 @@ export async function uploadHomeVideoAction(formData: FormData): Promise<ActionR
 
     revalidatePath("/");
     revalidatePath("/admin/videos");
+    revalidatePath("/admin/videos/new");
+
     return ok({ mediaId });
   } catch (e: any) {
     return fail(e?.message ?? "Erreur uploadHomeVideoAction");
   }
 }
 
-export async function updateHomeVideoMetaAction(formData: FormData): Promise<ActionResult<null>> {
+export async function updateHomeVideoMetaAction(
+  formData: FormData
+): Promise<ActionResult<null>> {
   try {
+    await requireAdminNoRedirect();
+
     const supabase = await supabaseServerAction();
     const mediaId = cleanText(formData.get("media_id"));
     const title = cleanText(formData.get("title"));
@@ -230,7 +268,11 @@ export async function updateHomeVideoMetaAction(formData: FormData): Promise<Act
     if (!mediaId) return fail("media_id manquant.");
     if (!title) return fail("Le titre est obligatoire.");
 
-    const { error } = await supabase.from("media").update({ title, description }).eq("id", mediaId);
+    const { error } = await supabase
+      .from("media")
+      .update({ title, description })
+      .eq("id", mediaId);
+
     if (error) return fail(error.message);
 
     revalidatePath("/");
@@ -241,8 +283,12 @@ export async function updateHomeVideoMetaAction(formData: FormData): Promise<Act
   }
 }
 
-export async function updateHomeVideoOrderAction(formData: FormData): Promise<ActionResult<null>> {
+export async function updateHomeVideoOrderAction(
+  formData: FormData
+): Promise<ActionResult<null>> {
   try {
+    await requireAdminNoRedirect();
+
     const supabase = await supabaseServerAction();
     const mediaId = cleanText(formData.get("media_id"));
     const orderIndex = toInt(formData.get("order_index"), 0);
@@ -268,8 +314,12 @@ export async function updateHomeVideoOrderAction(formData: FormData): Promise<Ac
   }
 }
 
-export async function setFeaturedHomeVideoAction(formData: FormData): Promise<ActionResult<null>> {
+export async function setFeaturedHomeVideoAction(
+  formData: FormData
+): Promise<ActionResult<null>> {
   try {
+    await requireAdminNoRedirect();
+
     const supabase = await supabaseServerAction();
     const mediaId = cleanText(formData.get("media_id"));
 
@@ -286,11 +336,18 @@ export async function setFeaturedHomeVideoAction(formData: FormData): Promise<Ac
 
     if (error) return fail(error.message);
 
-    const rows = (data ?? []) as Array<{ media_id: string; order_index: number }>;
+    const rows = (data ?? []) as Array<{
+      media_id: string;
+      order_index: number;
+    }>;
+
     const chosen = rows.find((r) => r.media_id === mediaId);
     if (!chosen) return fail("Cette vidéo n'est pas liée à home.videos.");
 
-    const reordered = [mediaId, ...rows.map((r) => r.media_id).filter((id) => id !== mediaId)];
+    const reordered = [
+      mediaId,
+      ...rows.map((r) => r.media_id).filter((id) => id !== mediaId),
+    ];
 
     for (let i = 0; i < reordered.length; i++) {
       const id = reordered[i];
@@ -312,8 +369,12 @@ export async function setFeaturedHomeVideoAction(formData: FormData): Promise<Ac
   }
 }
 
-export async function deleteHomeVideoAction(formData: FormData): Promise<ActionResult<null>> {
+export async function deleteHomeVideoAction(
+  formData: FormData
+): Promise<ActionResult<null>> {
   try {
+    await requireAdminNoRedirect();
+
     const supabase = await supabaseServerAction();
     const mediaId = cleanText(formData.get("media_id"));
 
@@ -339,11 +400,17 @@ export async function deleteHomeVideoAction(formData: FormData): Promise<ActionR
 
     if (unlinkErr) return fail(unlinkErr.message);
 
-    const { error: delErr } = await supabase.from("media").delete().eq("id", mediaId);
+    const { error: delErr } = await supabase
+      .from("media")
+      .delete()
+      .eq("id", mediaId);
+
     if (delErr) return fail(delErr.message);
 
     if ((media as any)?.bucket && (media as any)?.path) {
-      await supabase.storage.from((media as any).bucket).remove([(media as any).path]);
+      await supabase.storage
+        .from((media as any).bucket)
+        .remove([(media as any).path]);
     }
 
     const thumbId = (media as any)?.thumbnail_media_id as string | null;
@@ -357,7 +424,9 @@ export async function deleteHomeVideoAction(formData: FormData): Promise<ActionR
       if (!tReadErr && thumb) {
         await supabase.from("media").delete().eq("id", thumbId);
         if ((thumb as any).bucket && (thumb as any).path) {
-          await supabase.storage.from((thumb as any).bucket).remove([(thumb as any).path]);
+          await supabase.storage
+            .from((thumb as any).bucket)
+            .remove([(thumb as any).path]);
         }
       }
     }
