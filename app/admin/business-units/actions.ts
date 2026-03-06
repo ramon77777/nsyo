@@ -129,6 +129,7 @@ export async function createBusinessUnitAction(
       .from("business_units")
       .insert({
         name: title,
+        title: title,
         slug,
         summary,
         order_index,
@@ -176,6 +177,7 @@ export async function updateBusinessUnitAction(
       .from("business_units")
       .update({
         name: title,
+        title: title,
         slug,
         summary,
         order_index,
