@@ -1,8 +1,14 @@
-import { supabaseServer } from "@/lib/supabase/server";
-import type { SiteSetting } from "@/lib/supabase/types";
+// lib/data/settings.ts
+import { supabaseServerReadonly } from "@/lib/supabase/server";
+
+export type SiteSettingRow = {
+  key: string;
+  value: any;
+};
 
 export async function getSiteSettings(): Promise<Record<string, any>> {
-  const supabase = supabaseServer();
+  // ✅ IMPORTANT: await sinon supabase = Promise
+  const supabase = await supabaseServerReadonly();
 
   const { data, error } = await supabase
     .from("site_settings")
@@ -10,7 +16,10 @@ export async function getSiteSettings(): Promise<Record<string, any>> {
 
   if (error) throw new Error(error.message);
 
-  const map: Record<string, any> = {};
-  (data as SiteSetting[]).forEach((row) => (map[row.key] = row.value));
-  return map;
+  const out: Record<string, any> = {};
+  (data ?? []).forEach((row: SiteSettingRow) => {
+    out[row.key] = row.value;
+  });
+
+  return out;
 }
