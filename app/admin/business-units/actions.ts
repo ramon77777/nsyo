@@ -19,11 +19,14 @@ function toStr(fd: FormData, key: string) {
   const v = fd.get(key);
   return typeof v === "string" ? v.trim() : "";
 }
-function toNum(fd: FormData, key: string) {
+
+function toNum(fd: FormData, key: string, fallback = 0) {
   const s = toStr(fd, key);
+  if (!s) return fallback;
   const n = Number(s);
-  return Number.isFinite(n) ? n : 0;
+  return Number.isFinite(n) ? Math.floor(n) : fallback;
 }
+
 function slugify(input: string) {
   return input
     .normalize("NFKD")
@@ -36,51 +39,70 @@ function slugify(input: string) {
     .replace(/^-|-$/g, "");
 }
 
-async function ensureUniqueBusinessUnitSlug(
-  baseSlug: string,
-  excludeId?: string
-) {
-  const supabase = await supabaseServerReadonly();
-  const safeBase = (baseSlug || "pole").trim();
-
-  let candidate = safeBase;
-  for (let i = 0; i < 200; i++) {
-    let q = supabase
-      .from("business_units")
-      .select("id")
-      .eq("slug", candidate);
-    if (excludeId) q = q.neq("id", excludeId);
-
-    const { data, error } = await q.maybeSingle();
-    if (error) throw new Error(error.message);
-    if (!data) return candidate;
-
-    candidate = `${safeBase}-${i + 1}`;
-  }
-  return `${safeBase}-${Date.now()}`;
-}
-
 function revalidateBU() {
   revalidatePath("/admin/business-units");
+  revalidatePath("/admin");
   revalidatePath("/");
   revalidatePath("/references");
 }
 
 function friendlyPostgresError(e: any): string {
-  // Supabase/PostgREST renvoie souvent { code, message, details, hint }
   const code = String(e?.code ?? "");
-  const msg = String(e?.message ?? "");
+  const msg = String(e?.message ?? "").trim();
+  const details = String(e?.details ?? "").trim();
 
-  // 23503 = foreign_key_violation
-  // Si ça arrive encore, c'est qu'il reste une FK sans CASCADE (souvent sur projects -> project_media, etc.)
+  if (code === "23505" || msg.toLowerCase().includes("duplicate key")) {
+    return "Une valeur unique existe déjà (par exemple le slug).";
+  }
+
   if (code === "23503" || msg.toLowerCase().includes("foreign key")) {
     return (
-      "Suppression impossible car d’autres éléments dépendent encore de ce pôle (contrainte de clé étrangère). " +
-      "Vérifie les tables liées (ex: medias liés aux projets, etc.) et mets aussi leurs FK en ON DELETE CASCADE."
+      "Suppression impossible car d’autres éléments dépendent encore de ce pôle. " +
+      "Vérifie les relations de base de données encore actives."
     );
   }
 
-  return msg || "Erreur serveur.";
+  if (code === "42501") {
+    return "Accès refusé par Supabase/RLS.";
+  }
+
+  if (msg) return details ? `${msg} — ${details}` : msg;
+  return "Erreur serveur.";
+}
+
+async function ensureUniqueBusinessUnitSlug(
+  baseSlug: string,
+  excludeId?: string
+) {
+  const supabase = await supabaseServerReadonly();
+
+  const normalizedBase = slugify(baseSlug || "pole") || "pole";
+  let candidate = normalizedBase;
+
+  for (let i = 0; i < 200; i++) {
+    let query = supabase
+      .from("business_units")
+      .select("id")
+      .eq("slug", candidate);
+
+    if (excludeId) {
+      query = query.neq("id", excludeId);
+    }
+
+    const { data, error } = await query.maybeSingle();
+
+    if (error) {
+      throw new Error(error.message);
+    }
+
+    if (!data) {
+      return candidate;
+    }
+
+    candidate = `${normalizedBase}-${i + 1}`;
+  }
+
+  return `${normalizedBase}-${Date.now()}`;
 }
 
 export async function createBusinessUnitAction(
@@ -90,25 +112,36 @@ export async function createBusinessUnitAction(
     await requireAdminNoRedirect();
 
     const title = toStr(fd, "title");
-    if (!title) return fail("Le titre est obligatoire.");
+    if (!title) {
+      return fail("Le titre est obligatoire.");
+    }
 
     const summary = toStr(fd, "summary") || null;
-    const order_index = toNum(fd, "order_index");
+    const order_index = toNum(fd, "order_index", 0);
 
     const rawSlug = toStr(fd, "slug") || title;
-    const slug = await ensureUniqueBusinessUnitSlug(slugify(rawSlug));
+    const normalizedSlug = slugify(rawSlug) || slugify(title) || "pole";
+    const slug = await ensureUniqueBusinessUnitSlug(normalizedSlug);
 
     const supabase = await supabaseServerAction();
+
     const { data, error } = await supabase
       .from("business_units")
-      .insert({ title, slug, summary, order_index })
+      .insert({
+        title,
+        slug,
+        summary,
+        order_index,
+      })
       .select("id")
       .single();
 
-    if (error) return fail(error.message);
+    if (error) {
+      return fail(friendlyPostgresError(error));
+    }
 
     revalidateBU();
-    return ok({ id: (data as any).id as string });
+    return ok({ id: String((data as any).id) });
   } catch (e: any) {
     return fail(friendlyPostgresError(e));
   }
@@ -120,18 +153,25 @@ export async function updateBusinessUnitAction(
 ): Promise<ActionResult<{ id: string }>> {
   try {
     await requireAdminNoRedirect();
-    if (!id) return fail("ID manquant.");
+
+    if (!id) {
+      return fail("ID manquant.");
+    }
 
     const title = toStr(fd, "title");
-    if (!title) return fail("Le titre est obligatoire.");
+    if (!title) {
+      return fail("Le titre est obligatoire.");
+    }
 
     const summary = toStr(fd, "summary") || null;
-    const order_index = toNum(fd, "order_index");
+    const order_index = toNum(fd, "order_index", 0);
 
     const rawSlug = toStr(fd, "slug") || title;
-    const slug = await ensureUniqueBusinessUnitSlug(slugify(rawSlug), id);
+    const normalizedSlug = slugify(rawSlug) || slugify(title) || "pole";
+    const slug = await ensureUniqueBusinessUnitSlug(normalizedSlug, id);
 
     const supabase = await supabaseServerAction();
+
     const { error } = await supabase
       .from("business_units")
       .update({
@@ -143,7 +183,9 @@ export async function updateBusinessUnitAction(
       })
       .eq("id", id);
 
-    if (error) return fail(error.message);
+    if (error) {
+      return fail(friendlyPostgresError(error));
+    }
 
     revalidateBU();
     return ok({ id });
@@ -152,21 +194,26 @@ export async function updateBusinessUnitAction(
   }
 }
 
-// ✅ CASCADE: on NE bloque PAS si des projets existent.
-// On supprime le pôle, et Postgres supprimera automatiquement projects (ON DELETE CASCADE).
 export async function deleteBusinessUnitAction(
   id: string
 ): Promise<ActionResult<{ id: string }>> {
   try {
     await requireAdminNoRedirect();
-    if (!id) return fail("ID manquant.");
+
+    if (!id) {
+      return fail("ID manquant.");
+    }
 
     const supabase = await supabaseServerAction();
 
-    // Important: .delete().eq(...) suffit, le CASCADE est côté DB.
-    const { error } = await supabase.from("business_units").delete().eq("id", id);
+    const { error } = await supabase
+      .from("business_units")
+      .delete()
+      .eq("id", id);
 
-    if (error) return fail(friendlyPostgresError(error));
+    if (error) {
+      return fail(friendlyPostgresError(error));
+    }
 
     revalidateBU();
     return ok({ id });
@@ -181,8 +228,17 @@ export async function reorderBusinessUnitsAction(args: {
   try {
     await requireAdminNoRedirect();
 
+    const orderedIds = Array.isArray(args.orderedIds)
+      ? args.orderedIds.filter(Boolean)
+      : [];
+
+    if (!orderedIds.length) {
+      return fail("Aucun élément à réordonner.");
+    }
+
     const supabase = await supabaseServerAction();
-    const updates = args.orderedIds.map((id, idx) => ({
+
+    const updates = orderedIds.map((id, idx) => ({
       id,
       order_index: idx + 1,
       updated_at: new Date().toISOString(),
@@ -192,7 +248,9 @@ export async function reorderBusinessUnitsAction(args: {
       .from("business_units")
       .upsert(updates, { onConflict: "id" });
 
-    if (error) return fail(error.message);
+    if (error) {
+      return fail(friendlyPostgresError(error));
+    }
 
     revalidateBU();
     return ok({ count: updates.length });
